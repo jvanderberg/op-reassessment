@@ -1,7 +1,7 @@
 import type { FeatureCollection } from 'geojson';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, SlidersHorizontal, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { MapContainer, TileLayer } from 'react-leaflet';
+import { MapContainer, TileLayer, ZoomControl } from 'react-leaflet';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -118,6 +118,13 @@ function useSystemDarkMode() {
 	return isDark;
 }
 
+function useDefaultFilterPaneOpen() {
+	return useState(() => {
+		if (typeof window === 'undefined') return true;
+		return window.matchMedia('(min-width: 768px)').matches;
+	});
+}
+
 export default function App() {
 	const isDarkMode = useSystemDarkMode();
 	const [properties, setProperties] = useState<Reassessment[]>([]);
@@ -132,6 +139,7 @@ export default function App() {
 	const [groupBy, setGroupBy] = useState<GroupBy>('neighborhood');
 	const [classFiltersOpen, setClassFiltersOpen] = useState(true);
 	const [neighborhoodFiltersOpen, setNeighborhoodFiltersOpen] = useState(true);
+	const [filterPaneOpen, setFilterPaneOpen] = useDefaultFilterPaneOpen();
 	const [selectedLegendBins, setSelectedLegendBins] = useState<
 		Set<IncreaseLegendId>
 	>(new Set(INCREASE_LEGEND.map((item) => item.id)));
@@ -267,15 +275,53 @@ export default function App() {
 	}
 
 	return (
-		<div className="flex h-screen w-screen bg-background text-foreground">
-			<aside className="w-96 shrink-0 border-r border-border bg-background overflow-y-auto p-4 flex flex-col gap-4">
-				<div>
-					<h1 className="text-lg font-semibold">
-						Oak Park Residential Reassessment
-					</h1>
-					<p className="text-xs text-muted-foreground">
-						2026 mailed market values compared with final 2025 market values
-					</p>
+		<div className="flex h-dvh w-screen overflow-hidden bg-background text-foreground">
+			{filterPaneOpen && (
+				<button
+					type="button"
+					className="fixed inset-0 z-[650] bg-background/55 backdrop-blur-[1px] md:hidden"
+					aria-label="Close filters"
+					onClick={() => setFilterPaneOpen(false)}
+				/>
+			)}
+			{!filterPaneOpen && (
+				<button
+					type="button"
+					className="fixed left-0 top-24 z-[720] flex h-24 w-9 items-center justify-center rounded-r-md border border-l-0 border-border bg-background/95 text-foreground shadow-sm"
+					aria-label="Open filters"
+					aria-expanded={filterPaneOpen}
+					onClick={() => setFilterPaneOpen(true)}
+				>
+					<span className="flex rotate-90 items-center gap-1 text-xs font-medium">
+						<SlidersHorizontal className="size-3.5" />
+						Filters
+					</span>
+				</button>
+			)}
+			<aside
+				className={`fixed inset-y-0 left-0 z-[700] flex max-w-96 shrink-0 flex-col gap-4 overflow-y-auto bg-background shadow-xl transition-[transform,width,padding] md:static md:z-auto md:h-full md:max-w-none md:translate-x-0 md:shadow-none ${
+					filterPaneOpen
+						? 'w-[calc(100vw-3rem)] translate-x-0 border-r border-border p-4 md:w-96'
+						: 'w-[calc(100vw-3rem)] -translate-x-full border-r border-border p-4 md:w-0 md:overflow-hidden md:border-r-0 md:p-0'
+				}`}
+			>
+				<div className="flex items-start justify-between gap-3">
+					<div>
+						<h1 className="text-lg font-semibold">
+							Oak Park Residential Reassessment
+						</h1>
+						<p className="text-xs text-muted-foreground">
+							2026 mailed market values compared with final 2025 market values
+						</p>
+					</div>
+					<button
+						type="button"
+						className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+						aria-label="Close filters"
+						onClick={() => setFilterPaneOpen(false)}
+					>
+						<X className="size-4" />
+					</button>
 				</div>
 
 				<SearchInput
@@ -283,7 +329,7 @@ export default function App() {
 					onHighlight={setHighlightedProperty}
 				/>
 
-				<div className="grid grid-cols-2 gap-2">
+				<div className="hidden grid-cols-2 gap-2 md:grid">
 					<div className="rounded-md border border-border p-3">
 						<div className="text-xs text-muted-foreground">
 							Average Increase
@@ -500,14 +546,16 @@ export default function App() {
 				</section>
 			</aside>
 
-			<main className="relative flex-1">
+			<main className="relative min-w-0 flex-1">
 				<MapContainer
 					center={OAK_PARK_CENTER}
 					zoom={14}
 					maxZoom={19}
+					zoomControl={false}
 					className="h-full w-full"
 					preferCanvas={true}
 				>
+					<ZoomControl position="bottomright" />
 					<TileLayer
 						key={isDarkMode ? 'dark-tiles' : 'light-tiles'}
 						attribution="&copy; OpenStreetMap contributors &copy; CARTO"
@@ -527,7 +575,31 @@ export default function App() {
 						isDarkMode={isDarkMode}
 					/>
 				</MapContainer>
-				<div className="absolute bottom-4 left-4 z-[500] rounded-md border border-border bg-background/95 p-3 text-xs shadow-sm">
+				<div className="absolute left-12 right-3 top-3 z-[500] grid grid-cols-2 gap-2 md:hidden">
+					<div className="rounded-md border border-border bg-background/95 p-2 shadow-sm">
+						<div className="text-[11px] text-muted-foreground">
+							Average Increase
+						</div>
+						<div className="text-sm font-semibold">
+							{formatCurrency(totals.avgIncrease)}
+						</div>
+						<div className="text-[11px] text-muted-foreground">
+							{formatPercent(totals.avgIncreasePct)}
+						</div>
+					</div>
+					<div className="rounded-md border border-border bg-background/95 p-2 shadow-sm">
+						<div className="text-[11px] text-muted-foreground">
+							Median Increase
+						</div>
+						<div className="text-sm font-semibold">
+							{formatCurrency(totals.medianIncrease)}
+						</div>
+						<div className="text-[11px] text-muted-foreground">
+							{formatPercent(totals.medianIncreasePct)}
+						</div>
+					</div>
+				</div>
+				<div className="absolute bottom-4 left-3 z-[500] rounded-md border border-border bg-background/95 p-3 text-xs shadow-sm md:left-4">
 					<div className="mb-2 flex items-center justify-between gap-3">
 						<span className="font-medium">Increase</span>
 						<button
