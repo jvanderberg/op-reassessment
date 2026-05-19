@@ -2,6 +2,7 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "leaflet/dist/leaflet.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -142,19 +143,36 @@ body {
   color: var(--foreground);
 }
 
-.leaflet-popup-content-wrapper,
-.leaflet-popup-tip {
+.leaflet-container .leaflet-popup-content-wrapper,
+.leaflet-container .leaflet-popup-tip,
+.leaflet-container .leaflet-tooltip {
   background: var(--popover);
   color: var(--popover-foreground);
   border: 1px solid var(--border);
   box-shadow: 0 10px 30px oklch(0 0 0 / 18%);
 }
 
-.leaflet-popup-content {
+.leaflet-container .leaflet-tooltip-top::before {
+  border-top-color: var(--border);
+}
+
+.leaflet-container .leaflet-tooltip-bottom::before {
+  border-bottom-color: var(--border);
+}
+
+.leaflet-container .leaflet-tooltip-left::before {
+  border-left-color: var(--border);
+}
+
+.leaflet-container .leaflet-tooltip-right::before {
+  border-right-color: var(--border);
+}
+
+.leaflet-container .leaflet-popup-content {
   color: var(--popover-foreground);
 }
 
-.leaflet-popup-content a {
+.leaflet-container .leaflet-popup-content a {
   color: var(--primary);
 }
 

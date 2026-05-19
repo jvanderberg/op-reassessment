@@ -23,7 +23,6 @@ import {
 	OAK_PARK_CENTER,
 } from './constants';
 import type { GroupBy, Reassessment, SummaryRow } from './types';
-import 'leaflet/dist/leaflet.css';
 
 function median(values: number[]) {
 	if (values.length === 0) return 0;
