@@ -114,6 +114,34 @@ Based on the patterns in `app/src/index.css` and `app/src/App.tsx`.
 - Hit targets: 32px minimum (`size-8` / `py-1.5`). Tap-to-expand for
   clustered markers; never rely on hover.
 
+### Accessibility
+
+- **Keyboard nav**: every interactive element reachable in tab order,
+  including legend swatches (they're already `<button>` — keep them
+  that way) and marker popups (open with Enter, close with Esc). The
+  map needs an "skip to map" anchor and arrow-key panning via
+  Leaflet's built-in keyboard handler (enabled by default — don't
+  disable it).
+- **Focus rings**: use the existing `--ring` token; never strip
+  `outline` without a replacement. shadcn components ship with
+  `focus-visible:ring-2` — keep it.
+- **ARIA**: label icon-only buttons (`aria-label="Open filters"`,
+  `aria-label="Close filters"`, `aria-label="Clear search"`). Use
+  `aria-expanded` on collapsible section headers and `aria-pressed` on
+  toggle buttons (the legend filter uses this — copy the pattern).
+- **Color is never the only cue**. Pick a **colorblind-safe divergent
+  palette** for the legend — the reference app uses a 7-stop
+  ColorBrewer-style ramp; verify it against deuteranopia and
+  protanopia simulators before shipping. Pair color with a textual
+  label in tooltips and a numeric range in the legend so the bin is
+  legible without color.
+- **Contrast**: text on every surface variable pair must clear WCAG AA
+  (4.5:1 for body, 3:1 for large). Re-check after any OKLCH token
+  tweak — it's easy to drop `--muted-foreground` below threshold.
+- **Reduced motion**: gate the drawer slide, chevron rotate, and map
+  fly-to behind `prefers-reduced-motion: no-preference`. Snap, don't
+  animate, when the visitor has asked for less motion.
+
 ## Data Sources
 
 Three categories of input feed the recipe. The reference app pulls all
@@ -179,6 +207,23 @@ Write the joined output as **two static files**:
 The browser fetches both at startup with `Promise.all`, joins them by
 ID into a Map once, and renders from memo'd selectors.
 
+### Provenance & freshness
+
+Civic data goes stale silently. Bake provenance into the build so the
+UI can be honest about it:
+
+- Wrap the extract output in a manifest object — `{ generatedAt:
+  '2026-05-20T14:00:00Z', sources: { assessedValues: { dataset:
+  'uzyt-m557', rowCount: 12345, lastModified: '…' }, … }, records:
+  [...] }` — or write a sibling `manifest.json` alongside the data
+  files. Either works; pick one and stick to it.
+- Surface "Data as of *YYYY-MM-DD*" in the title block and again in the
+  data-source popover. Make it unmissable.
+- The extract step should fail loudly on schema surprises: assert
+  expected columns exist, row counts are in a sane range, and at least
+  N% of records geocoded by the direct or parent-PIN methods. A silent
+  null-flood is worse than a failed build.
+
 ## UX
 
 The goal is a visitor who has never seen the site understanding the
@@ -194,6 +239,29 @@ headline finding within ten seconds.
 - Reuse the same currency/percent formatters (`formatCurrency`,
   `formatPercent`) everywhere so the map popup, table, and KPI cards
   agree to the dollar.
+
+### Loading, empty, and error states
+
+The three JSON fetches are the longest critical-path operation in the
+app. Spec each visible state, don't ship a white screen:
+
+- **Loading**: render the chrome immediately — sidebar shell, KPI
+  cards as skeleton blocks, map container with the basemap tiles
+  already drawing. Avoid a centered spinner on a blank page; the
+  basemap alone gives the visitor a sense of place while data
+  arrives.
+- **Partial load**: don't block the map on `parcels.geojson` if
+  `reassessments.json` is already in hand — draw point markers first,
+  then swap to parcel polygons when the geometry arrives. Progressive
+  rendering beats a synchronized but slower paint.
+- **Empty filter result**: when the active filters select zero
+  records, the table and KPIs read "—" (the same null-display used by
+  `formatCurrency`) and a single-button "Reset filters" appears
+  inline. Don't silently show a blank map.
+- **Fetch failure**: catch the `Promise.all` rejection and render an
+  error card in place of the KPIs with the upstream URL, the HTTP
+  status, and a "Retry" button. Link to the data-source popover so
+  the visitor can verify the underlying portal is up.
 
 ### Fluid map interactions
 
@@ -233,7 +301,7 @@ Treat the URL as the source of truth for *view* state so a visitor can
 copy the address bar and a colleague sees exactly the same map:
 
 - Serialize selected classes, selected neighborhoods, selected legend
-  bins, group-by mode, highlighted PIN, and (optionally) map
+  bins, group-by mode, highlighted record ID, and (optionally) map
   center/zoom into search params (`?class=202,203&nbhd=…&bins=gte50&
   group=class&pin=…`). Use short keys; comma-separate values.
 - On load, hydrate the Zustand store from `location.search` before the
@@ -241,9 +309,16 @@ copy the address bar and a colleague sees exactly the same map:
 - On every relevant state change, debounce a `history.replaceState`
   (not `pushState`, to keep the back button useful) that writes the new
   URL. Don't fire on every keystroke in the search box — only commit
-  the highlighted PIN.
-- Provide a "Share this view" button that copies the current URL — it's
-  the cheapest way to turn a static site into a collaborative tool.
+  the highlighted ID.
+- **Per-record permalink**: `?pin=…` (or whatever the canonical ID is)
+  is a first-class entry point. On hydrate, look the record up, pan
+  the map to it, draw the highlight ring, and open the popup
+  automatically — no extra click. This is the link visitors actually
+  share ("here's my property") and it costs almost nothing once URL
+  state is already wired.
+- Provide a "Share this view" button that copies the current URL, and
+  a separate "Share this record" affordance inside the marker popup
+  that copies a `?pin=…` permalink — two distinct sharing intents.
 
 ### Animations
 
@@ -254,3 +329,36 @@ copy the address bar and a colleague sees exactly the same map:
   animate KPI numbers (it makes them harder to read).
 - Respect `prefers-reduced-motion` — wrap non-essential transitions in
   a `@media (prefers-reduced-motion: no-preference)` block.
+
+## Testing
+
+This isn't a heavily unit-tested codebase shape — most of the logic is
+either data extraction or visual rendering. Aim for **tripwires, not
+coverage**:
+
+- **Extract snapshot test**: hold a small fixture DB (or recorded API
+  responses) under `test/fixtures/`, run the extract script against
+  it, and snapshot `reassessments.json` + `parcels.geojson`. Any
+  upstream schema drift or extract-logic regression shows up as a
+  diff in the next PR. Cheap, durable, catches the bug class that
+  matters most.
+- **Join-coverage assertion**: as part of the extract, assert that
+  ≥X% of records resolve via the direct or parent-ID method (the
+  reference app should clear 90%+). Fail the build if it drops —
+  silent geocoding decay is a real failure mode.
+- **Boot smoke test**: a single Playwright (or Vitest + jsdom)
+  scenario that loads the app against the committed fixtures, waits
+  for the KPI cards to render real values, opens the data-source
+  popover, and selects a legend bin. If this passes, the wiring is
+  intact.
+- **Pure-function unit tests** for the math that drives the headline
+  numbers — `median`, `aggregateIncreasePct`, `increaseLegendId`,
+  the coordinate-resolver fallback chain. These are the functions
+  that, if quietly wrong, would mislead every visitor.
+- **Visual regression**: optional but worthwhile — a Playwright
+  screenshot of the map at a fixed zoom + filter set, gated to
+  re-baseline only on intentional UI changes.
+
+Skip: exhaustive component tests, integration tests against live
+upstream APIs (flaky, no signal), and snapshot tests of JSX trees
+(noise).
