@@ -31,26 +31,14 @@ equivalent public datasets.
 static files — HTML, JS, CSS, and pre-built JSON/GeoJSON data —
 served by any CDN or static host. There is no runtime database, no
 API server, and no backend. All data work happens at build time in a
-Node extract step that fetches from upstream sources (or reads from a
-local cache of them), normalizes the records, and writes the JSON
-files the browser will fetch on first load. If you can deploy a
+Node extract step that fetches from upstream sources (or reads from
+a local cache of them), normalizes the records, and writes the
+JSON/GeoJSON files the browser will fetch on first load. The build
+pipeline runs in one direction: upstream public APIs → optional
+local SQLite cache (build machine only, never deployed) → Node
+extract script → static JSON + GeoJSON in the Vite `public/`
+directory → Vite build → static site on a CDN. If you can deploy a
 folder of HTML, you can deploy this app.
-
-```
-upstream APIs / portals          (Socrata, ArcGIS, etc.)
-       │
-       │  one-time / cron bulk pull (optional, for large datasets)
-       ▼
-local SQLite cache               (build-time only, never deployed)
-       │
-       │  extract script (Node)
-       ▼
-static JSON + GeoJSON files      (committed or built into the bundle)
-       │
-       │  Vite build
-       ▼
-static site                      (CDN / GitHub Pages / S3 / etc.)
-```
 
 Keep the stack small and use the latest stable versions that interoperate:
 
@@ -253,14 +241,26 @@ PIN, per year.
 
 **1c. Property Classes** (lookup) — 3-digit class code to human
 description (e.g. `203 = One story residence, any age, 1,001 to
-1,800 sq. ft.`). Find the current dataset ID by searching
-"property classes" on the portal; load once and join in memory.
+1,800 sq. ft.`). The Assessor publishes this as a static reference
+page rather than a Socrata dataset:
+
+- Reference page:
+  <https://www.cookcountyassessoril.gov/classifications-real-property>
+- Treat it as a small embedded lookup: maintain a hand-curated JSON
+  of `{ code: description }` pairs in your repo and join in memory.
+  This list changes rarely (years between updates) and is small
+  enough to commit.
 
 **1d. Property Characteristics** (optional, for richer popups) —
-square footage, year built, bedroom/bath counts per PIN-year-card.
-Use these to flesh out the per-record detail view. Search
-"property characteristics" on the same portal to find the current
-dataset ID.
+square footage, year built, bedroom/bath counts per PIN-year per
+improvement (building). Multiple rows per PIN-year when a parcel
+has multiple buildings.
+
+- Portal: <https://datacatalog.cookcountyil.gov/Property-Taxation/Assessor-Single-and-Multi-Family-Improvement-Chara/x54s-btds>
+- JSON endpoint: <https://datacatalog.cookcountyil.gov/resource/x54s-btds.json>
+- Schema fields commonly used in popups: `pin`, `year`, `card`
+  (building number), `char_bldg_sf`, `char_yrblt`, `char_beds`,
+  `char_fbath`, `char_hbath`, `char_class`.
 
 ### 2. Geospatial geometry (the picture)
 
@@ -301,18 +301,27 @@ jurisdiction publishes:
   their own ArcGIS portal (look for `<city>.hub.arcgis.com` or
   `<city>-open-data.hub.arcgis.com`). Find the layer titled
   "Municipal Boundary", "City Limits", or similar and grab its
-  FeatureServer query URL — the layer page lists it under "I want
-  to use this" → "View API resources". For the Cook County worked
-  example, the Village of Oak Park portal at
-  <https://oak-park-open-data-portal-v2-oakparkil.hub.arcgis.com>
-  is the source.
+  FeatureServer query URL — the layer page lists it under
+  "I want to use this" → "View API resources". For the Cook County
+  worked example, the Village of Oak Park portal lives at
+  <https://oak-park-open-data-portal-v2-oakparkil.hub.arcgis.com>.
 - *Path B — union of sub-features*. If no single boundary polygon
-  is published, fetch a layer of sub-features that tile the
-  jurisdiction (historic districts, census tracts, ZIP polygons) and
-  union them with [`@turf/union`](https://turfjs.org/docs/api/union)
-  in the extract step. Query the layer with `where=1=1` and
-  `f=geojson`, then merge all features into one. Result: one
-  `FeatureCollection` with a single feature.
+  is published (or the published one is awkward to query), fetch a
+  layer of sub-features that tile the jurisdiction (historic
+  districts, census tracts, ZIP polygons) and union them with
+  [`@turf/union`](https://turfjs.org/docs/api/union) in the extract
+  step. Query with `where=1=1` and `f=geojson`, then merge all
+  features into one. Result: one `FeatureCollection` with a single
+  feature. The Cook County worked example takes this path against
+  the Village's Census Tracts layer:
+
+  ```
+  https://utility.arcgis.com/usrsvcs/servers/4cff1aaefa364b57b8c70d5c606f2088/rest/services/VOP/AGOL_VOP_Project/MapServer/159
+  ```
+
+  Query it with `?f=pjson` for the schema, or append `/query` and
+  POST `where=1=1&outFields=*&outSR=4326&f=geojson&returnGeometry=true`
+  to fetch every tract polygon.
 - Whichever path you take, **bake the source URL into the manifest**
   (see Provenance & freshness) so visitors can verify what they're
   looking at.
