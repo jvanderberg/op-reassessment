@@ -19,11 +19,26 @@ a ZIP — and you want a fast, static, mobile-friendly site that:
 - joining them by a stable identifier (PIN, license number, school ID, etc.)
   so the map, summary tables, and search all stay in sync.
 
-The reference implementation in this repository overlays Cook County
-Assessor reassessment values onto Oak Park parcel geometry and lets users
-compare year-over-year market value changes by neighborhood and class.
+A worked example threaded through the Data Sources section applies the
+pattern to Cook County, IL property reassessments — annual market
+values overlaid on parcel geometry, with year-over-year change as the
+headline metric. The pattern transfers to any jurisdiction with
+equivalent public datasets.
 
 ## App Stack
+
+**Delivery model: pure static.** The deployed app is a directory of
+static files — HTML, JS, CSS, and pre-built JSON/GeoJSON data —
+served by any CDN or static host. There is no runtime database, no
+API server, and no backend. All data work happens at build time in a
+Node extract step that fetches from upstream sources (or reads from
+a local cache of them), normalizes the records, and writes the
+JSON/GeoJSON files the browser will fetch on first load. The build
+pipeline runs in one direction: upstream public APIs → optional
+local SQLite cache (build machine only, never deployed) → Node
+extract script → static JSON + GeoJSON in the Vite `public/`
+directory → Vite build → static site on a CDN. If you can deploy a
+folder of HTML, you can deploy this app.
 
 Keep the stack small and use the latest stable versions that interoperate:
 
@@ -33,8 +48,9 @@ Keep the stack small and use the latest stable versions that interoperate:
   for keyframes, `@fontsource-variable/geist` for typography, `clsx` +
   `tailwind-merge` for class composition.
 - **Components**: shadcn/ui on Radix primitives, `lucide-react` for icons,
-  `class-variance-authority` for variants. Components are vendored into
-  `app/src/components/ui` so they can be tweaked in place.
+  `class-variance-authority` for variants. Vendor the shadcn components
+  into a local `components/ui/` directory so they can be tweaked in
+  place rather than imported from a package.
 - **State**: **Zustand** for app-wide state — filters, selected legend bins,
   highlighted record, theme, URL-serialized view. Prefer one store with
   selector slices over deep `useState` trees and prop drilling. Use local
@@ -44,17 +60,19 @@ Keep the stack small and use the latest stable versions that interoperate:
   canvas renderer for marker-heavy views.
 - **Geo math**: `@turf/*` (union, point-in-polygon, helpers, buffer) in
   the extract step — keep heavy geometry work out of the browser.
-- **Data pipeline**: a Node script that reads the source DB / fetches the
-  source APIs, normalizes records, and writes static JSON + GeoJSON into
-  `app/public/`. `better-sqlite3` for local SQLite sources.
+- **Data pipeline (build-time only)**: a Node script that fetches the
+  source APIs (or reads them from a local cache), normalizes records,
+  and writes static JSON + GeoJSON into the Vite `public/` directory.
+  `better-sqlite3` for reading the optional local cache. None of this
+  ships to the client — the deployed bundle never opens a database
+  or hits a query API.
 - **Quality**: Biome for lint + format (tabs, single quotes), TypeScript
-  strict, a `check.cjs` wrapper exposed as `npm run check` / `check:fix`.
+  strict, and a single `check` / `check:fix` npm script that wraps
+  lint + format + typecheck so contributors only learn one command.
 - **Deploy**: static hosting (GitHub Pages, Cloudflare Pages, S3+CDN). No
   server, no API at runtime — the extract step is the backend.
 
 ## Style Guide
-
-Based on the patterns in `app/src/index.css` and `app/src/App.tsx`.
 
 ### Theme
 
@@ -128,13 +146,12 @@ Based on the patterns in `app/src/index.css` and `app/src/App.tsx`.
 - **ARIA**: label icon-only buttons (`aria-label="Open filters"`,
   `aria-label="Close filters"`, `aria-label="Clear search"`). Use
   `aria-expanded` on collapsible section headers and `aria-pressed` on
-  toggle buttons (the legend filter uses this — copy the pattern).
+  any toggle button (legend filters, group-by switches, theme toggle).
 - **Color is never the only cue**. Pick a **colorblind-safe divergent
-  palette** for the legend — the reference app uses a 7-stop
-  ColorBrewer-style ramp; verify it against deuteranopia and
-  protanopia simulators before shipping. Pair color with a textual
-  label in tooltips and a numeric range in the legend so the bin is
-  legible without color.
+  palette** for the legend — a 7-stop ColorBrewer-style ramp works
+  well; verify it against deuteranopia and protanopia simulators
+  before shipping. Pair color with a textual label in tooltips and a
+  numeric range in the legend so the bin is legible without color.
 - **Contrast**: text on every surface variable pair must clear WCAG AA
   (4.5:1 for body, 3:1 for large). Re-check after any OKLCH token
   tweak — it's easy to drop `--muted-foreground` below threshold.
@@ -144,40 +161,226 @@ Based on the patterns in `app/src/index.css` and `app/src/App.tsx`.
 
 ## Data Sources
 
-Three categories of input feed the recipe. The reference app pulls all
-three from Cook County, but the pattern generalizes.
+Three categories of input feed the recipe. The worked example below
+pulls all three from Cook County, IL public data services; each
+source is documented with its portal page, the machine-readable
+endpoint, the query mechanics, the schema fields the pattern relies
+on, and the license/attribution — usable on its own as a reference,
+and the pattern transfers to any equivalent municipal data sources.
+
+Two source platforms recur and are worth knowing:
+
+- **Socrata Open Data API (SODA)**. Tabular datasets on
+  `datacatalog.cookcountyil.gov` and most US municipal portals. Each
+  dataset has a 4x4 ID (e.g. `uzyt-m557`); the human page lives at
+  `https://<host>/d/<id>` and the JSON endpoint at
+  `https://<host>/resource/<id>.json`. Query with SoQL params:
+  `$select`, `$where`, `$order`, `$limit` (default 1000, max
+  50000), `$offset`. Send `X-App-Token: <token>` to lift throttling —
+  register a free app token on the portal. Full field metadata and
+  column types are on the dataset page's "Columns" tab and at
+  `https://<host>/api/views/<id>.json`.
+- **Esri ArcGIS REST FeatureServer / MapServer**. Geospatial layers
+  exposed at `.../FeatureServer/<layerId>` or
+  `.../MapServer/<layerId>`. Append `?f=pjson` to that URL to read
+  the layer's full schema (field names, types, geometry type, spatial
+  reference). Append `/query` and POST a form-encoded body with
+  `where`, `outFields`, `outSR=4326`, `f=geojson`,
+  `returnGeometry=true` to fetch features. Servers cap responses
+  (commonly 1000–2000 features) — paginate with
+  `resultOffset`/`resultRecordCount`, or batch your `where IN (…)`
+  list into chunks of ~500 IDs.
 
 ### 1. Tabular records (the spine)
 
-- **Reference dataset**: Cook County Assessor *Assessed Values* and
-  *Parcel Addresses* on the Socrata open data portal
-  (`datacatalog.cookcountyil.gov`), mirrored locally in a SQLite DB
-  (`tax_appeal_app/data/properties.db`).
-- **Provenance**: government open-data portal; identifier is the 14-digit
-  Property Index Number (PIN). Each row is one parcel-year.
-- **Extraction**: `extract-reassessments.cjs` opens the SQLite DB
-  read-only, joins `assessed_values` (year 2026 ↔ year 2025) with
-  `parcel_addresses` and `property_classes`, filters to Oak Park +
-  residential class codes, picks the latest available assessment stage
-  (board → certified → mailed), and emits `reassessments.json`.
+Three Socrata datasets from the Cook County Assessor on
+`datacatalog.cookcountyil.gov`. Each is updated on the Assessor's
+own cadence (assessed values: annually plus reassessment-cycle
+updates; addresses: monthly-ish). License: public domain / open data
+per the [Cook County Open Data
+Terms](https://datacatalog.cookcountyil.gov/login/terms_of_use).
+
+**1a. Assessed Values** — annual market value, land + building +
+total, at each assessment stage.
+
+- Portal: <https://datacatalog.cookcountyil.gov/d/uzyt-m557>
+- JSON endpoint: <https://datacatalog.cookcountyil.gov/resource/uzyt-m557.json>
+- Schema fields the recipe uses (see portal Columns tab for full list):
+  - `pin` (text, 14-digit Property Index Number — **join key**)
+  - `year` (number)
+  - `class` (text, 3-digit property class code)
+  - `township_code`, `township_name`, `nbhd` (text — neighborhood code)
+  - `mailed_bldg`, `mailed_land`, `mailed_tot`, `mailed_hie` (number)
+  - `certified_bldg`, `certified_land`, `certified_tot`, `certified_hie`
+  - `board_bldg`, `board_land`, `board_tot`, `board_hie`
+- Query example (all 2026 values for one township, paginated):
+
+  ```
+  GET https://datacatalog.cookcountyil.gov/resource/uzyt-m557.json
+      ?$where=year=2026 AND township_code='10'
+      &$limit=50000
+  ```
+
+- Stage selection: pick the latest non-null total per row — board →
+  certified → mailed — so you always show the most up-to-date value
+  for that PIN/year.
+
+**1b. Parcel Addresses** — situs address and mailing address per
+PIN, per year.
+
+- Portal: <https://datacatalog.cookcountyil.gov/d/3723-97qp>
+- JSON endpoint: <https://datacatalog.cookcountyil.gov/resource/3723-97qp.json>
+- Schema fields used:
+  - `pin` (text — **join key**)
+  - `year` (number)
+  - `prop_address_full`, `prop_address_city_name`,
+    `prop_address_state`, `prop_address_zipcode_1` (text — situs)
+  - `mail_address_name`, `mail_address_full`,
+    `mail_address_city_name`, `mail_address_state`,
+    `mail_address_zipcode_1` (text — mailing)
+
+**1c. Property Classes** (lookup) — 3-digit class code to human
+description (e.g. `203 = One story residence, any age, 1,001 to
+1,800 sq. ft.`). The Assessor publishes this as a static reference
+page rather than a Socrata dataset:
+
+- Reference page:
+  <https://www.cookcountyassessoril.gov/classifications-real-property>
+- Treat it as a small embedded lookup: maintain a hand-curated JSON
+  of `{ code: description }` pairs in your repo and join in memory.
+  This list changes rarely (years between updates) and is small
+  enough to commit.
+
+**1d. Property Characteristics** (optional, for richer popups) —
+square footage, year built, bedroom/bath counts per PIN-year per
+improvement (building). Multiple rows per PIN-year when a parcel
+has multiple buildings.
+
+- Portal: <https://datacatalog.cookcountyil.gov/Property-Taxation/Assessor-Single-and-Multi-Family-Improvement-Chara/x54s-btds>
+- JSON endpoint: <https://datacatalog.cookcountyil.gov/resource/x54s-btds.json>
+- Schema fields commonly used in popups: `pin`, `year`, `card`
+  (building number), `char_bldg_sf`, `char_yrblt`, `char_beds`,
+  `char_fbath`, `char_hbath`, `char_class`.
 
 ### 2. Geospatial geometry (the picture)
 
-- **Parcels**: Cook County GIS `Parcel_2022` FeatureServer, queried in
-  batches of 500 PINs over HTTP with `where name IN (…)`, returned as
-  GeoJSON in EPSG:4326. The script enriches each feature's `properties`
-  with the joined record fields so the renderer never has to look the
-  record up again at draw time.
-- **Boundary**: a single polygon for the jurisdiction (Oak Park),
-  fetched from the Village's ArcGIS portal and unioned with
-  `@turf/union` so the village outline is one feature, not many.
+Two ArcGIS FeatureServer layers from Cook County GIS.
+
+**2a. Parcel polygons** — the property boundary geometry.
+
+- Layer page: <https://gis.cookcountyil.gov/hosting/rest/services/Hosted/Parcel_2022/FeatureServer/0>
+- Schema (full): <https://gis.cookcountyil.gov/hosting/rest/services/Hosted/Parcel_2022/FeatureServer/0?f=pjson>
+- Query endpoint:
+  <https://gis.cookcountyil.gov/hosting/rest/services/Hosted/Parcel_2022/FeatureServer/0/query>
+- Join field: `name` (the 14-digit parcel PIN). Not every assessed
+  PIN has a polygon — condos in particular share a building polygon
+  under the parent PIN.
+- Query mechanics: POST form-encoded
+  `where=name IN ('14...','14...',...)&outFields=name&outSR=4326&f=geojson`
+  in batches of ~500 PINs (URL length and server limits). Example:
+
+  ```
+  POST .../FeatureServer/0/query
+  Content-Type: application/x-www-form-urlencoded
+  where=name IN ('16071010010000','16071010020000','16071010030000')
+  outFields=name
+  outSR=4326
+  f=geojson
+  ```
+
+- Output: GeoJSON `FeatureCollection`; each feature's
+  `properties.name` is the PIN. Enrich each feature with the joined
+  tabular fields so the browser doesn't need a second lookup.
+- License: per Cook County GIS terms of use, attribution required.
+
+**2b. Jurisdiction boundary** — one polygon describing the area
+your app covers. Two practical paths, depending on what your
+jurisdiction publishes:
+
+- *Path A — published boundary layer*. Most municipalities publish
+  their own ArcGIS portal (look for `<city>.hub.arcgis.com` or
+  `<city>-open-data.hub.arcgis.com`). Find the layer titled
+  "Municipal Boundary", "City Limits", or similar and grab its
+  FeatureServer query URL — the layer page lists it under
+  "I want to use this" → "View API resources". For the Cook County
+  worked example, the Village of Oak Park portal lives at
+  <https://oak-park-open-data-portal-v2-oakparkil.hub.arcgis.com>.
+- *Path B — union of sub-features*. If no single boundary polygon
+  is published (or the published one is awkward to query), fetch a
+  layer of sub-features that tile the jurisdiction (historic
+  districts, census tracts, ZIP polygons) and union them with
+  [`@turf/union`](https://turfjs.org/docs/api/union) in the extract
+  step. Query with `where=1=1` and `f=geojson`, then merge all
+  features into one. Result: one `FeatureCollection` with a single
+  feature. The Cook County worked example takes this path against
+  the Village's Census Tracts layer:
+
+  ```
+  https://utility.arcgis.com/usrsvcs/servers/4cff1aaefa364b57b8c70d5c606f2088/rest/services/VOP/AGOL_VOP_Project/MapServer/159
+  ```
+
+  Query it with `?f=pjson` for the schema, or append `/query` and
+  POST `where=1=1&outFields=*&outSR=4326&f=geojson&returnGeometry=true`
+  to fetch every tract polygon.
+- Whichever path you take, **bake the source URL into the manifest**
+  (see Provenance & freshness) so visitors can verify what they're
+  looking at.
 
 ### 3. Coordinate reference (the bridge)
 
-- **Address points**: a third dataset (`address_points`) keyed by PIN
-  with lat/lon. Used when a record can't be matched directly to a
-  parcel polygon (condos, vacant land, exempt parcels — about 7% of
-  rows in the reference app).
+A PIN → (lat, lon) lookup, used when a record can't be matched to a
+parcel polygon. In Cook County this is **Address Points**:
+
+- Portal: <https://datacatalog.cookcountyil.gov/d/78yw-iddh>
+- JSON endpoint: <https://datacatalog.cookcountyil.gov/resource/78yw-iddh.json>
+- Schema fields used:
+  - `pin` (text — join key)
+  - `address` (text)
+  - `city` (text — filter to your jurisdiction)
+  - `lat`, `lon` (number, WGS84)
+- Query example (all Oak Park points):
+
+  ```
+  GET https://datacatalog.cookcountyil.gov/resource/78yw-iddh.json
+      ?$where=upper(city)='OAK PARK'
+      &$limit=50000
+  ```
+
+- Expect a single-digit percentage of records to need this fallback
+  (condos, vacant land, exempt parcels — about 7% in the Cook
+  County example). Compute the number at extract time and disclose
+  it in your UI; don't hide it.
+
+### Working copy: cache before you query
+
+> **Build-time only.** The SQLite cache described here lives on the
+> machine (or CI runner) that runs the extract step. It is **never
+> shipped to the browser**, never deployed, never queried at runtime.
+> The deployed app only sees the static JSON / GeoJSON files the
+> extract step writes; the cache exists so those files can be
+> rebuilt reliably without hammering upstream portals.
+
+Hitting Socrata + ArcGIS from a build step is fine for small
+datasets but fragile for anything county-scale. The recommended
+pattern is a one-time bulk pull into a local SQLite file (hundreds
+of MB at county scale) keyed by the join ID, with the extract step
+reading from that cache instead of going back to the network on
+every build:
+
+- Bulk fetch script that pages through each Socrata dataset
+  (`$limit=50000` + `$offset`) and inserts into SQLite tables named
+  after the dataset.
+- Refresh on a cron (weekly is plenty for slow-moving assessment-
+  style data) — typically as a separate CI job from the site build.
+- The Socrata `:updated_at` system field on each row lets you do
+  incremental pulls: `$where=:updated_at > '<last_run_iso>'`.
+- ArcGIS parcel geometry rarely changes — cache it for months.
+- Keep the cache file out of the deployed bundle: list it in
+  `.gitignore`, and never reference it from browser code.
+
+For small datasets (a few thousand records) skip SQLite entirely —
+the extract step can fetch from the upstream API directly on each
+build. The cache is an optimization, not a requirement.
 
 ### Joining heterogeneous sources
 
@@ -192,16 +395,17 @@ everything else through a deterministic fallback chain:
 3. **Normalized address match** — uppercased, with street-type
    suffix-stripped, against an in-memory address map. Last-resort
    fallback for records whose IDs don't appear in any geometry source.
-4. **Drop with a counter** — keep a `methodCounts` tally so you can
-   report how many records were placed by each method and how many were
-   dropped. Surface the dropped count in the UI (the `InfoButton`
-   popover does this) instead of hiding it.
+4. **Drop with a counter** — keep a per-method tally so you can
+   report how many records were placed by each method and how many
+   were dropped. Surface the dropped count in the UI (the data-source
+   info popover is the natural home for it) instead of hiding it.
 
-Write the joined output as **two static files**:
+Write the joined output as **two static files** in the static-assets
+directory:
 
-- `reassessments.json` — flat array of records, one per entity.
-- `parcels.geojson` — `FeatureCollection` where each feature carries
-  enough joined fields (`address`, `class`, `increasePct`, etc.) to
+- `records.json` — flat array of records, one per entity.
+- `geometry.geojson` — `FeatureCollection` where each feature carries
+  enough joined fields (address, class, headline metric, etc.) to
   render and popup without a second lookup.
 
 The browser fetches both at startup with `Promise.all`, joins them by
@@ -213,8 +417,8 @@ Civic data goes stale silently. Bake provenance into the build so the
 UI can be honest about it:
 
 - Wrap the extract output in a manifest object — `{ generatedAt:
-  '2026-05-20T14:00:00Z', sources: { assessedValues: { dataset:
-  'uzyt-m557', rowCount: 12345, lastModified: '…' }, … }, records:
+  '2026-05-20T14:00:00Z', sources: { <sourceKey>: { dataset:
+  '<id-or-url>', rowCount: 12345, lastModified: '…' }, … }, records:
   [...] }` — or write a sibling `manifest.json` alongside the data
   files. Either works; pick one and stick to it.
 - Surface "Data as of *YYYY-MM-DD*" in the title block and again in the
@@ -234,11 +438,13 @@ headline finding within ten seconds.
 - Two large KPIs above the fold: an **average** and a **median**
   (medians blunt outliers in skewed civic distributions — show both).
 - A grouped summary **table** below the KPIs that breaks the population
-  down two ways (here: by neighborhood, by class) with a toggle. Keep
-  totals live: any filter change updates KPIs, table, and map together.
-- Reuse the same currency/percent formatters (`formatCurrency`,
-  `formatPercent`) everywhere so the map popup, table, and KPI cards
-  agree to the dollar.
+  down two complementary ways (e.g. by neighborhood and by category)
+  with a toggle. Keep totals live: any filter change updates KPIs,
+  table, and map together.
+- Define currency/percent/number formatters once in a shared module
+  and reuse them in the map popup, table, and KPI cards so every
+  surface agrees to the dollar. Make them tolerant of `null` and
+  return a consistent sentinel (`—`).
 
 ### Loading, empty, and error states
 
@@ -250,14 +456,14 @@ app. Spec each visible state, don't ship a white screen:
   already drawing. Avoid a centered spinner on a blank page; the
   basemap alone gives the visitor a sense of place while data
   arrives.
-- **Partial load**: don't block the map on `parcels.geojson` if
-  `reassessments.json` is already in hand — draw point markers first,
-  then swap to parcel polygons when the geometry arrives. Progressive
+- **Partial load**: don't block the map on the geometry file if the
+  records file is already in hand — draw point markers first, then
+  swap to parcel polygons when the geometry arrives. Progressive
   rendering beats a synchronized but slower paint.
 - **Empty filter result**: when the active filters select zero
-  records, the table and KPIs read "—" (the same null-display used by
-  `formatCurrency`) and a single-button "Reset filters" appears
-  inline. Don't silently show a blank map.
+  records, the table and KPIs read the null-display sentinel (`—`)
+  and a single-button "Reset filters" appears inline. Don't silently
+  show a blank map.
 - **Fetch failure**: catch the `Promise.all` rejection and render an
   error card in place of the KPIs with the upstream URL, the HTTP
   status, and a "Retry" button. Link to the data-source popover so
@@ -267,30 +473,34 @@ app. Spec each visible state, don't ship a white screen:
 
 - **Cluster, then expand**: when many records share a parcel or
   coordinate, draw one polygon/circle whose color is the
-  *base-weighted* aggregate. Click expands the cluster into a sunflower
-  of offset points (golden-angle layout — see `offsetLatLng`) so
-  individual units are still selectable.
+  *base-weighted* aggregate. Click expands the cluster into a
+  sunflower of offset points — place children around the center on a
+  golden-angle (~137.5°) spiral with a radius that grows with
+  `sqrt(index)`, so points don't overlap and the layout is
+  deterministic — and individual units become selectable.
 - **Color-coded legend that filters**: legend swatches are buttons.
   Clicking one isolates that bin on the map *without* changing the
   summary totals — visitors can probe "where are the 50%+ increases?"
   without losing the denominator.
 - **Smooth highlight**: search-selected records pan the map and draw a
-  ring + dot in the foreground pane (`z-index` 470) above the
-  fill, so the chosen record stands out without flashing or bouncing.
-- **Canvas renderer** with a dedicated pane (`L.canvas({ pane:
-  'markers' })`) keeps tens of thousands of markers responsive on
-  mobile.
+  ring + dot in a dedicated Leaflet pane stacked above markers, so
+  the chosen record stands out without flashing or bouncing.
+- **Canvas renderer**: use Leaflet's canvas renderer (`L.canvas({
+  pane: 'markers' })`) on a dedicated marker pane to keep tens of
+  thousands of points responsive on mobile.
 
 ### Tooltips & help
 
 - Marker tooltips on clusters explain *what* and *how* — "N units, X% to
   Y%. Click to expand." Don't leave the visitor guessing what a circle
   represents.
-- Provide an always-visible `?` info button (`InfoButton.tsx` template)
-  that opens a popover citing every data source with a link and a
-  one-line description, plus a frank disclosure of known gaps
-  (e.g. "~7% of properties lack coordinates"). Trust is built by being
-  explicit about the seams.
+- Provide an always-visible `?` info button that opens a popover with:
+  every data source's portal URL and a one-line description, the
+  "Data as of *YYYY-MM-DD*" stamp from the manifest, a frank
+  disclosure of known gaps (e.g. "~7% of properties lack coordinates
+  and aren't shown on the map"), and the source license/attribution
+  text where required. Trust is built by being explicit about the
+  seams.
 - Hover tooltips on truncated text use the native `title` attribute so
   full class descriptions and neighborhood codes are reachable without
   resizing the panel.
@@ -332,29 +542,29 @@ copy the address bar and a colleague sees exactly the same map:
 
 ## Testing
 
-This isn't a heavily unit-tested codebase shape — most of the logic is
-either data extraction or visual rendering. Aim for **tripwires, not
-coverage**:
+This shape of app — data extraction plus visual rendering — doesn't
+reward heavy unit coverage. Aim for **tripwires, not coverage**:
 
-- **Extract snapshot test**: hold a small fixture DB (or recorded API
-  responses) under `test/fixtures/`, run the extract script against
-  it, and snapshot `reassessments.json` + `parcels.geojson`. Any
-  upstream schema drift or extract-logic regression shows up as a
-  diff in the next PR. Cheap, durable, catches the bug class that
-  matters most.
+- **Extract snapshot test**: hold a small fixture DB (or recorded
+  API responses) under `test/fixtures/`, run the extract script
+  against it, and snapshot the `records.json` + `geometry.geojson`
+  outputs. Any upstream schema drift or extract-logic regression
+  shows up as a diff in the next PR. Cheap, durable, catches the bug
+  class that matters most.
 - **Join-coverage assertion**: as part of the extract, assert that
-  ≥X% of records resolve via the direct or parent-ID method (the
-  reference app should clear 90%+). Fail the build if it drops —
-  silent geocoding decay is a real failure mode.
+  ≥X% of records resolve via the direct or parent-ID method (aim
+  for ≥90% in production). Fail the build if it drops — silent
+  geocoding decay is a real failure mode.
 - **Boot smoke test**: a single Playwright (or Vitest + jsdom)
   scenario that loads the app against the committed fixtures, waits
   for the KPI cards to render real values, opens the data-source
   popover, and selects a legend bin. If this passes, the wiring is
   intact.
 - **Pure-function unit tests** for the math that drives the headline
-  numbers — `median`, `aggregateIncreasePct`, `increaseLegendId`,
-  the coordinate-resolver fallback chain. These are the functions
-  that, if quietly wrong, would mislead every visitor.
+  numbers — the median calculator, the base-weighted aggregate
+  percent calculator, the legend-bin classifier, and the
+  coordinate-resolver fallback chain. These are the functions that,
+  if quietly wrong, would mislead every visitor.
 - **Visual regression**: optional but worthwhile — a Playwright
   screenshot of the map at a fixed zoom + filter set, gated to
   re-baseline only on intentional UI changes.
