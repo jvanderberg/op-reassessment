@@ -102,6 +102,68 @@ function polygonLatLngs(feature: GeoJSON.Feature) {
 	return null;
 }
 
+function collectLatLngs(
+	latLngs: unknown,
+	out: [number, number][] = [],
+): [number, number][] {
+	if (!Array.isArray(latLngs)) return out;
+	if (
+		latLngs.length === 2 &&
+		typeof latLngs[0] === 'number' &&
+		typeof latLngs[1] === 'number'
+	) {
+		out.push(latLngs as [number, number]);
+		return out;
+	}
+	for (const item of latLngs) collectLatLngs(item, out);
+	return out;
+}
+
+function polygonCenter(feature: GeoJSON.Feature) {
+	const latLngs = polygonLatLngs(feature);
+	const points = collectLatLngs(latLngs);
+	if (points.length === 0) return null;
+	return L.latLngBounds(points).getCenter();
+}
+
+function offsetLatLng(
+	center: L.LatLngExpression,
+	index: number,
+	total: number,
+) {
+	const latLng = L.latLng(center);
+	if (total <= 1) return latLng;
+
+	const angle = index * 2.399963229728653;
+	const radiusMeters = 6 + Math.sqrt(index) * 5;
+	const latOffset = (Math.sin(angle) * radiusMeters) / 111_320;
+	const lonOffset =
+		(Math.cos(angle) * radiusMeters) /
+		(111_320 * Math.cos((latLng.lat * Math.PI) / 180));
+
+	return L.latLng(latLng.lat + latOffset, latLng.lng + lonOffset);
+}
+
+function addPointMarker(
+	layer: L.LayerGroup,
+	renderer: L.Canvas,
+	property: Reassessment,
+	latLng: L.LatLngExpression,
+) {
+	const color = increaseColor(property.increasePct);
+	L.circleMarker(latLng, {
+		radius: 4,
+		color,
+		fillColor: color,
+		fillOpacity: 0.82,
+		weight: 1,
+		renderer,
+		pane: 'markers',
+	})
+		.bindPopup(() => popup(property))
+		.addTo(layer);
+}
+
 export function ReassessmentMarkers({
 	properties,
 	parcels,
@@ -150,39 +212,76 @@ export function ReassessmentMarkers({
 			}
 
 			for (const group of groups.values()) {
-				const first = byPin.get(group.pins[0]);
 				const latLngs = polygonLatLngs(group.feature);
-				if (!first || !latLngs) continue;
-				const color = increaseColor(first.increasePct);
+				if (!latLngs) continue;
+
+				if (group.pins.length === 1) {
+					const property = byPin.get(group.pins[0]);
+					if (!property) continue;
+					const color = increaseColor(property.increasePct);
+					L.polygon(latLngs as L.LatLngExpression[] | L.LatLngExpression[][], {
+						color,
+						fillColor: color,
+						fillOpacity: 0.62,
+						weight: 1,
+						renderer,
+						pane: 'markers',
+					})
+						.bindPopup(() => popup(property))
+						.addTo(layer);
+					renderedPins.add(property.pin);
+					continue;
+				}
+
+				const center = polygonCenter(group.feature);
+				if (!center) continue;
 				L.polygon(latLngs as L.LatLngExpression[] | L.LatLngExpression[][], {
-					color,
-					fillColor: color,
-					fillOpacity: 0.62,
+					color: '#737373',
+					fillColor: '#737373',
+					fillOpacity: 0.08,
 					weight: 1,
 					renderer,
 					pane: 'markers',
-				})
-					.bindPopup(() => popup(first))
-					.addTo(layer);
-				for (const pin of group.pins) renderedPins.add(pin);
+					interactive: false,
+				}).addTo(layer);
+				group.pins.forEach((pin, index) => {
+					const property = byPin.get(pin);
+					if (!property) return;
+					addPointMarker(
+						layer,
+						renderer,
+						property,
+						offsetLatLng(center, index, group.pins.length),
+					);
+					renderedPins.add(property.pin);
+				});
 			}
 		}
 
+		const pointGroups = new Map<string, Reassessment[]>();
 		for (const property of properties) {
-			if (renderedPins.has(property.pin) || !property.lat || !property.lon)
+			if (renderedPins.has(property.pin) || !property.lat || !property.lon) {
 				continue;
-			const color = increaseColor(property.increasePct);
-			L.circleMarker([property.lat, property.lon], {
-				radius: 4,
-				color,
-				fillColor: color,
-				fillOpacity: 0.8,
-				weight: 1,
-				renderer,
-				pane: 'markers',
-			})
-				.bindPopup(() => popup(property))
-				.addTo(layer);
+			}
+			const key = `${property.lat.toFixed(6)},${property.lon.toFixed(6)}`;
+			const rows = pointGroups.get(key) || [];
+			rows.push(property);
+			pointGroups.set(key, rows);
+		}
+
+		for (const group of pointGroups.values()) {
+			const center: [number, number] = [
+				group[0].lat as number,
+				group[0].lon as number,
+			];
+			group.forEach((property, index) => {
+				addPointMarker(
+					layer,
+					renderer,
+					property,
+					offsetLatLng(center, index, group.length),
+				);
+			});
 		}
 
 		return () => {

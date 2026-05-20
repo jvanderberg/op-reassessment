@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Extract Oak Park 2026 single-family reassessments from the tax_appeal_app DB.
+ * Extract Oak Park 2026 residential reassessments from the tax_appeal_app DB.
  *
  * The source database is opened read-only. By default, this writes all static
  * datasets served by the app:
@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const turfUnion = require('@turf/union').default;
 
-const SINGLE_FAMILY_CLASSES = [
+const RESIDENTIAL_CLASSES = [
 	'202',
 	'203',
 	'204',
@@ -25,8 +25,12 @@ const SINGLE_FAMILY_CLASSES = [
 	'207',
 	'208',
 	'209',
+	'210',
+	'211',
 	'234',
 	'278',
+	'295',
+	'299',
 ];
 
 const ARCGIS_PARCELS_URL =
@@ -233,7 +237,7 @@ async function main() {
 	console.log(`Source DB: ${opts.db}`);
 
 	const db = new Database(opts.db, { readonly: true });
-	const classList = SINGLE_FAMILY_CLASSES.map((cls) => `'${cls}'`).join(',');
+	const classList = RESIDENTIAL_CLASSES.map((cls) => `'${cls}'`).join(',');
 
 	const rows = db
 		.prepare(`
