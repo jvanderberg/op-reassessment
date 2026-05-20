@@ -197,8 +197,8 @@ Three Socrata datasets from the Cook County Assessor on
 `datacatalog.cookcountyil.gov`. Each is updated on the Assessor's
 own cadence (assessed values: annually plus reassessment-cycle
 updates; addresses: monthly-ish). License: public domain / open data
-per the [Cook County Open Data
-Terms](https://datacatalog.cookcountyil.gov/login/terms_of_use).
+per the [Cook County Terms of
+Use](https://www.cookcountyil.gov/terms-use).
 
 **1a. Assessed Values** — annual market value, land + building +
 total, at each assessment stage.
