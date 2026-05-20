@@ -145,39 +145,186 @@ Based on the patterns in `app/src/index.css` and `app/src/App.tsx`.
 ## Data Sources
 
 Three categories of input feed the recipe. The reference app pulls all
-three from Cook County, but the pattern generalizes.
+three from Cook County, IL public data services. Each source below is
+documented with its portal page, the machine-readable endpoint the
+extract step actually hits, the query mechanics, the schema fields the
+recipe relies on, and the license/attribution requirements — so this
+section is self-contained even if you don't have the repo handy.
+
+Two source platforms recur and are worth knowing:
+
+- **Socrata Open Data API (SODA)**. Tabular datasets on
+  `datacatalog.cookcountyil.gov` and most US municipal portals. Each
+  dataset has a 4x4 ID (e.g. `uzyt-m557`); the human page lives at
+  `https://<host>/d/<id>` and the JSON endpoint at
+  `https://<host>/resource/<id>.json`. Query with SoQL params:
+  `$select`, `$where`, `$order`, `$limit` (default 1000, max
+  50000), `$offset`. Send `X-App-Token: <token>` to lift throttling —
+  register a free app token on the portal. Full field metadata and
+  column types are on the dataset page's "Columns" tab and at
+  `https://<host>/api/views/<id>.json`.
+- **Esri ArcGIS REST FeatureServer / MapServer**. Geospatial layers
+  exposed at `.../FeatureServer/<layerId>` or
+  `.../MapServer/<layerId>`. Append `?f=pjson` to that URL to read
+  the layer's full schema (field names, types, geometry type, spatial
+  reference). Append `/query` and POST a form-encoded body with
+  `where`, `outFields`, `outSR=4326`, `f=geojson`,
+  `returnGeometry=true` to fetch features. Servers cap responses
+  (commonly 1000–2000 features) — paginate with
+  `resultOffset`/`resultRecordCount`, or batch your `where IN (…)`
+  list into chunks of ~500 IDs.
 
 ### 1. Tabular records (the spine)
 
-- **Reference dataset**: Cook County Assessor *Assessed Values* and
-  *Parcel Addresses* on the Socrata open data portal
-  (`datacatalog.cookcountyil.gov`), mirrored locally in a SQLite DB
-  (`tax_appeal_app/data/properties.db`).
-- **Provenance**: government open-data portal; identifier is the 14-digit
-  Property Index Number (PIN). Each row is one parcel-year.
-- **Extraction**: `extract-reassessments.cjs` opens the SQLite DB
-  read-only, joins `assessed_values` (year 2026 ↔ year 2025) with
-  `parcel_addresses` and `property_classes`, filters to Oak Park +
-  residential class codes, picks the latest available assessment stage
-  (board → certified → mailed), and emits `reassessments.json`.
+Three Socrata datasets from the Cook County Assessor on
+`datacatalog.cookcountyil.gov`. Each is updated on the Assessor's
+own cadence (assessed values: annually plus reassessment-cycle
+updates; addresses: monthly-ish). License: public domain / open data
+per the [Cook County Open Data
+Terms](https://datacatalog.cookcountyil.gov/login/terms_of_use).
+
+**1a. Assessed Values** — annual market value, land + building +
+total, at each assessment stage.
+
+- Portal: <https://datacatalog.cookcountyil.gov/d/uzyt-m557>
+- JSON endpoint: <https://datacatalog.cookcountyil.gov/resource/uzyt-m557.json>
+- Schema fields the recipe uses (see portal Columns tab for full list):
+  - `pin` (text, 14-digit Property Index Number — **join key**)
+  - `year` (number)
+  - `class` (text, 3-digit property class code)
+  - `township_code`, `township_name`, `nbhd` (text — neighborhood code)
+  - `mailed_bldg`, `mailed_land`, `mailed_tot`, `mailed_hie` (number)
+  - `certified_bldg`, `certified_land`, `certified_tot`, `certified_hie`
+  - `board_bldg`, `board_land`, `board_tot`, `board_hie`
+- Query example (all 2026 values for one township, paginated):
+
+  ```
+  GET https://datacatalog.cookcountyil.gov/resource/uzyt-m557.json
+      ?$where=year=2026 AND township_code='10'
+      &$limit=50000
+  ```
+
+- Stage selection: pick the latest non-null total per row — board →
+  certified → mailed — so you always show the most up-to-date value
+  for that PIN/year.
+
+**1b. Parcel Addresses** — situs address and mailing address per
+PIN, per year.
+
+- Portal: <https://datacatalog.cookcountyil.gov/d/3723-97qp>
+- JSON endpoint: <https://datacatalog.cookcountyil.gov/resource/3723-97qp.json>
+- Schema fields used:
+  - `pin` (text — **join key**)
+  - `year` (number)
+  - `prop_address_full`, `prop_address_city_name`,
+    `prop_address_state`, `prop_address_zipcode_1` (text — situs)
+  - `mail_address_name`, `mail_address_full`,
+    `mail_address_city_name`, `mail_address_state`,
+    `mail_address_zipcode_1` (text — mailing)
+
+**1c. Property Classes** (lookup) — 3-digit class code to human
+description (e.g. `203 = One story residence, any age, 1,001 to
+1,800 sq. ft.`). Find the current dataset ID by searching
+"property classes" on the portal; load once and join in memory.
+
+**1d. Property Characteristics** (optional, for richer popups) —
+square footage, year built, bedroom/bath counts per PIN-year-card.
+The reference app exposes these in the per-record detail. Search
+"property characteristics" on the same portal.
 
 ### 2. Geospatial geometry (the picture)
 
-- **Parcels**: Cook County GIS `Parcel_2022` FeatureServer, queried in
-  batches of 500 PINs over HTTP with `where name IN (…)`, returned as
-  GeoJSON in EPSG:4326. The script enriches each feature's `properties`
-  with the joined record fields so the renderer never has to look the
-  record up again at draw time.
-- **Boundary**: a single polygon for the jurisdiction (Oak Park),
-  fetched from the Village's ArcGIS portal and unioned with
-  `@turf/union` so the village outline is one feature, not many.
+Two ArcGIS FeatureServer layers from Cook County GIS.
+
+**2a. Parcel polygons** — the property boundary geometry.
+
+- Layer page: <https://gis.cookcountyil.gov/hosting/rest/services/Hosted/Parcel_2022/FeatureServer/0>
+- Schema (full): <https://gis.cookcountyil.gov/hosting/rest/services/Hosted/Parcel_2022/FeatureServer/0?f=pjson>
+- Query endpoint:
+  <https://gis.cookcountyil.gov/hosting/rest/services/Hosted/Parcel_2022/FeatureServer/0/query>
+- Join field: `name` (the 14-digit parcel PIN). Not every assessed
+  PIN has a polygon — condos in particular share a building polygon
+  under the parent PIN.
+- Query mechanics: POST form-encoded
+  `where=name IN ('14...','14...',...)&outFields=name&outSR=4326&f=geojson`
+  in batches of ~500 PINs (URL length and server limits). Example:
+
+  ```
+  POST .../FeatureServer/0/query
+  Content-Type: application/x-www-form-urlencoded
+  where=name IN ('16071010010000','16071010020000','16071010030000')
+  outFields=name
+  outSR=4326
+  f=geojson
+  ```
+
+- Output: GeoJSON `FeatureCollection`; each feature's
+  `properties.name` is the PIN. Enrich each feature with the joined
+  tabular fields so the browser doesn't need a second lookup.
+- License: per Cook County GIS terms of use, attribution required.
+
+**2b. Jurisdiction boundary** — one polygon describing the area
+your app covers. Two practical paths, depending on what your
+jurisdiction publishes:
+
+- *Path A — published boundary layer*. Most municipalities publish
+  their own ArcGIS portal (look for `<city>.hub.arcgis.com` or
+  `<city>-open-data.hub.arcgis.com`). Find the layer titled
+  "Municipal Boundary", "City Limits", or similar and grab its
+  FeatureServer query URL. For Oak Park the open-data portal lives
+  at <https://oak-park-open-data-portal-v2-oakparkil.hub.arcgis.com>
+  — browse its datasets, click into the layer page, and use the
+  REST URL listed under "I want to use this".
+- *Path B — union of sub-features*. If no single boundary polygon
+  is published, fetch a layer of sub-features that tile the
+  jurisdiction (historic districts, census tracts, ZIP polygons) and
+  union them with [`@turf/union`](https://turfjs.org/docs/api/union)
+  in the extract step. Query the layer with `where=1=1` and
+  `f=geojson`, then merge all features into one. Result: one
+  `FeatureCollection` with a single feature.
+- Whichever path you take, **bake the source URL into the manifest**
+  (see Provenance & freshness) so visitors can verify what they're
+  looking at.
 
 ### 3. Coordinate reference (the bridge)
 
-- **Address points**: a third dataset (`address_points`) keyed by PIN
-  with lat/lon. Used when a record can't be matched directly to a
-  parcel polygon (condos, vacant land, exempt parcels — about 7% of
-  rows in the reference app).
+A PIN → (lat, lon) lookup, used when a record can't be matched to a
+parcel polygon. In Cook County this is **Address Points**:
+
+- Portal: <https://datacatalog.cookcountyil.gov/d/78yw-iddh>
+- JSON endpoint: <https://datacatalog.cookcountyil.gov/resource/78yw-iddh.json>
+- Schema fields used:
+  - `pin` (text — join key)
+  - `address` (text)
+  - `city` (text — filter to your jurisdiction)
+  - `lat`, `lon` (number, WGS84)
+- Query example (all Oak Park points):
+
+  ```
+  GET https://datacatalog.cookcountyil.gov/resource/78yw-iddh.json
+      ?$where=upper(city)='OAK PARK'
+      &$limit=50000
+  ```
+
+- About 7% of records in the reference app rely on this fallback
+  (condos, vacant land, exempt parcels). Disclose that number in
+  your UI; don't hide it.
+
+### Working copy: cache before you query
+
+Hitting Socrata + ArcGIS from a build step is fine for small
+datasets but fragile for anything county-scale. The reference app
+pre-loads everything into a local SQLite file
+(`properties.db`, ~hundreds of MB) keyed by PIN+year, then the
+extract step reads from that. If you do the same:
+
+- Run a one-time bulk fetch script that pages through each Socrata
+  dataset (`$limit=50000` + `$offset`) and inserts into SQLite tables
+  named after the dataset.
+- Refresh on a cron (weekly is plenty for assessment data).
+- The Socrata `:updated_at` system field on each row lets you do
+  incremental pulls: `$where=:updated_at > '<last_run_iso>'`.
+- ArcGIS parcel geometry rarely changes — cache it for months.
 
 ### Joining heterogeneous sources
 
@@ -286,11 +433,13 @@ app. Spec each visible state, don't ship a white screen:
 - Marker tooltips on clusters explain *what* and *how* — "N units, X% to
   Y%. Click to expand." Don't leave the visitor guessing what a circle
   represents.
-- Provide an always-visible `?` info button (`InfoButton.tsx` template)
-  that opens a popover citing every data source with a link and a
-  one-line description, plus a frank disclosure of known gaps
-  (e.g. "~7% of properties lack coordinates"). Trust is built by being
-  explicit about the seams.
+- Provide an always-visible `?` info button that opens a popover with:
+  every data source's portal URL and a one-line description, the
+  "Data as of *YYYY-MM-DD*" stamp from the manifest, a frank
+  disclosure of known gaps (e.g. "~7% of properties lack coordinates
+  and aren't shown on the map"), and the source license/attribution
+  text where required. Trust is built by being explicit about the
+  seams.
 - Hover tooltips on truncated text use the native `title` attribute so
   full class descriptions and neighborhood codes are reachable without
   resizing the panel.
