@@ -27,6 +27,31 @@ equivalent public datasets.
 
 ## App Stack
 
+**Delivery model: pure static.** The deployed app is a directory of
+static files — HTML, JS, CSS, and pre-built JSON/GeoJSON data —
+served by any CDN or static host. There is no runtime database, no
+API server, and no backend. All data work happens at build time in a
+Node extract step that fetches from upstream sources (or reads from a
+local cache of them), normalizes the records, and writes the JSON
+files the browser will fetch on first load. If you can deploy a
+folder of HTML, you can deploy this app.
+
+```
+upstream APIs / portals          (Socrata, ArcGIS, etc.)
+       │
+       │  one-time / cron bulk pull (optional, for large datasets)
+       ▼
+local SQLite cache               (build-time only, never deployed)
+       │
+       │  extract script (Node)
+       ▼
+static JSON + GeoJSON files      (committed or built into the bundle)
+       │
+       │  Vite build
+       ▼
+static site                      (CDN / GitHub Pages / S3 / etc.)
+```
+
 Keep the stack small and use the latest stable versions that interoperate:
 
 - **Build/runtime**: Vite + TypeScript, React 19, Node 20+ for the
@@ -47,10 +72,12 @@ Keep the stack small and use the latest stable versions that interoperate:
   canvas renderer for marker-heavy views.
 - **Geo math**: `@turf/*` (union, point-in-polygon, helpers, buffer) in
   the extract step — keep heavy geometry work out of the browser.
-- **Data pipeline**: a Node script that reads the source DB / fetches the
-  source APIs, normalizes records, and writes static JSON + GeoJSON into
-  the Vite `public/` directory. `better-sqlite3` for local SQLite
-  sources.
+- **Data pipeline (build-time only)**: a Node script that fetches the
+  source APIs (or reads them from a local cache), normalizes records,
+  and writes static JSON + GeoJSON into the Vite `public/` directory.
+  `better-sqlite3` for reading the optional local cache. None of this
+  ships to the client — the deployed bundle never opens a database
+  or hits a query API.
 - **Quality**: Biome for lint + format (tabs, single quotes), TypeScript
   strict, and a single `check` / `check:fix` npm script that wraps
   lint + format + typecheck so contributors only learn one command.
@@ -317,20 +344,34 @@ parcel polygon. In Cook County this is **Address Points**:
 
 ### Working copy: cache before you query
 
+> **Build-time only.** The SQLite cache described here lives on the
+> machine (or CI runner) that runs the extract step. It is **never
+> shipped to the browser**, never deployed, never queried at runtime.
+> The deployed app only sees the static JSON / GeoJSON files the
+> extract step writes; the cache exists so those files can be
+> rebuilt reliably without hammering upstream portals.
+
 Hitting Socrata + ArcGIS from a build step is fine for small
 datasets but fragile for anything county-scale. The recommended
 pattern is a one-time bulk pull into a local SQLite file (hundreds
 of MB at county scale) keyed by the join ID, with the extract step
-reading from that cache:
+reading from that cache instead of going back to the network on
+every build:
 
 - Bulk fetch script that pages through each Socrata dataset
   (`$limit=50000` + `$offset`) and inserts into SQLite tables named
   after the dataset.
 - Refresh on a cron (weekly is plenty for slow-moving assessment-
-  style data).
+  style data) — typically as a separate CI job from the site build.
 - The Socrata `:updated_at` system field on each row lets you do
   incremental pulls: `$where=:updated_at > '<last_run_iso>'`.
 - ArcGIS parcel geometry rarely changes — cache it for months.
+- Keep the cache file out of the deployed bundle: list it in
+  `.gitignore`, and never reference it from browser code.
+
+For small datasets (a few thousand records) skip SQLite entirely —
+the extract step can fetch from the upstream API directly on each
+build. The cache is an optimization, not a requirement.
 
 ### Joining heterogeneous sources
 
