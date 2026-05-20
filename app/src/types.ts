@@ -25,6 +25,7 @@ export interface Reassessment {
 	lat: number | null;
 	lon: number | null;
 	coordinateMethod: string;
+	parcelPin?: string;
 	url: string;
 	assessment2025: AssessmentValue;
 	assessment2026: AssessmentValue;

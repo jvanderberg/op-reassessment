@@ -33,6 +33,11 @@ const RESIDENTIAL_CLASSES = [
 	'299',
 ];
 
+const EXCLUDED_PINS = new Set([
+	// Oak Park mailing/city record with parent PIN coordinates outside Oak Park.
+	'15112110181027',
+]);
+
 const ARCGIS_PARCELS_URL =
 	'https://gis.cookcountyil.gov/hosting/rest/services/Hosted/Parcel_2022/FeatureServer/0/query';
 
@@ -111,6 +116,10 @@ function stripUnit(addr) {
 	return addr || '';
 }
 
+function parentPin(pin) {
+	return `${pin.substring(0, 10)}0000`;
+}
+
 function buildCoordResolver(db) {
 	const directLookup = db.prepare(
 		'SELECT lat, lon FROM address_points WHERE pin = ?',
@@ -134,11 +143,15 @@ function buildCoordResolver(db) {
 			return { lat: direct.lat, lon: direct.lon, method: 'direct' };
 		}
 
-		const parentPin = `${pin.substring(0, 10)}0000`;
-		if (parentPin !== pin) {
-			const parent = parentLookup.get(parentPin);
-			if (parent?.lat && parent?.lon) {
-				return { lat: parent.lat, lon: parent.lon, method: 'parent_pin' };
+		const parent = parentPin(pin);
+		if (parent !== pin) {
+			const parentCoords = parentLookup.get(parent);
+			if (parentCoords?.lat && parentCoords?.lon) {
+				return {
+					lat: parentCoords.lat,
+					lon: parentCoords.lon,
+					method: 'parent_pin',
+				};
 			}
 		}
 
@@ -176,7 +189,9 @@ async function fetchParcelGeometries(properties) {
 	const batchSize = 500;
 	const features = [];
 	const missing = [];
-	const pins = properties.map((p) => p.pin);
+	const pins = [
+		...new Set(properties.flatMap((p) => [p.pin, p.parcelPin].filter(Boolean))),
+	];
 
 	console.log(`Fetching parcel geometries for ${pins.length} properties...`);
 	for (let i = 0; i < pins.length; i += batchSize) {
@@ -209,17 +224,26 @@ async function fetchParcelGeometries(properties) {
 	console.log(`\n  ${features.length} parcel geometries fetched, ${missing.length} missing`);
 
 	const byPin = new Map(properties.map((p) => [p.pin, p]));
+	const byParcelPin = new Map();
+	for (const property of properties) {
+		const rows = byParcelPin.get(property.parcelPin) || [];
+		rows.push(property);
+		byParcelPin.set(property.parcelPin, rows);
+	}
 	for (const feature of features) {
-		const reassessment = byPin.get(feature.properties.name);
-		if (!reassessment) continue;
+		const parcelPin = feature.properties.name;
+		const reassessment = byPin.get(parcelPin);
+		const parcelRows = byParcelPin.get(parcelPin) || [];
 		feature.properties = {
 			...feature.properties,
-			pin: reassessment.pin,
-			address: reassessment.address,
-			class: reassessment.class,
-			neighborhood: reassessment.neighborhood,
-			increasePct: reassessment.increasePct,
-			increase: reassessment.increase,
+			parcelPin,
+			pin: reassessment?.pin || parcelPin,
+			address: reassessment?.address || parcelRows[0]?.address || '',
+			class: reassessment?.class || parcelRows[0]?.class || '',
+			neighborhood: reassessment?.neighborhood || parcelRows[0]?.neighborhood || '',
+			unitCount: parcelRows.length || (reassessment ? 1 : 0),
+			increasePct: reassessment?.increasePct ?? null,
+			increase: reassessment?.increase ?? null,
 		};
 	}
 
@@ -238,6 +262,7 @@ async function main() {
 
 	const db = new Database(opts.db, { readonly: true });
 	const classList = RESIDENTIAL_CLASSES.map((cls) => `'${cls}'`).join(',');
+	const excludedPinList = [...EXCLUDED_PINS].map((pin) => `'${pin}'`).join(',');
 
 	const rows = db
 		.prepare(`
@@ -288,6 +313,7 @@ async function main() {
 			WHERE a26.year = 2026
 				AND upper(pa.prop_address_city_name) = 'OAK PARK'
 				AND a26.class IN (${classList})
+				AND a26.pin NOT IN (${excludedPinList})
 			ORDER BY pa.prop_address_full, a26.pin
 		`)
 		.all();
@@ -301,6 +327,7 @@ async function main() {
 			WHERE pc.year = 2026
 				AND upper(pa.prop_address_city_name) = 'OAK PARK'
 				AND a26.class IN (${classList})
+				AND a26.pin NOT IN (${excludedPinList})
 			ORDER BY pc.pin, pc.card
 		`)
 		.all();
@@ -323,6 +350,7 @@ async function main() {
 		const increasePct =
 			increase !== null && y2025.total ? (increase / y2025.total) * 100 : null;
 		const coords = resolveCoords(row.pin, row.prop_address_full);
+		const parcelPin = parentPin(row.pin);
 		methodCounts[coords.method]++;
 		const cards = cardsByPin.get(row.pin) || [];
 		const primaryCharacteristics = cards.find((card) => card.card === 1) || cards[0] || null;
@@ -342,6 +370,7 @@ async function main() {
 			lat: coords.lat,
 			lon: coords.lon,
 			coordinateMethod: coords.method,
+			parcelPin,
 			url: `https://www.cookcountyassessor.com/pin/${row.pin}`,
 			assessment2025: y2025,
 			assessment2026: y2026,

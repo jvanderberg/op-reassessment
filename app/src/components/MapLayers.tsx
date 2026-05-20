@@ -1,6 +1,6 @@
 import type { FeatureCollection } from 'geojson';
 import L from 'leaflet';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMap } from 'react-leaflet';
 import { formatCurrency, formatPercent, increaseColor } from '../constants';
 import type { Reassessment } from '../types';
@@ -71,17 +71,6 @@ function popup(property: Reassessment): HTMLElement {
 		.filter(Boolean)
 		.join('<br>');
 	return div;
-}
-
-function geometryFingerprint(feature: GeoJSON.Feature) {
-	const geometry = feature.geometry;
-	if (!geometry) return '';
-	if (geometry.type === 'Polygon')
-		return JSON.stringify(geometry.coordinates[0]?.[0]);
-	if (geometry.type === 'MultiPolygon') {
-		return JSON.stringify(geometry.coordinates[0]?.[0]?.[0]);
-	}
-	return JSON.stringify(geometry);
 }
 
 function polygonLatLngs(feature: GeoJSON.Feature) {
@@ -164,6 +153,48 @@ function addPointMarker(
 		.addTo(layer);
 }
 
+function groupTooltip(properties: Reassessment[], expanded: boolean) {
+	const pcts = properties
+		.map((property) => property.increasePct)
+		.filter((value): value is number => value !== null);
+	const min = Math.min(...pcts);
+	const max = Math.max(...pcts);
+	const pctText =
+		pcts.length === 0
+			? 'No percentage data'
+			: Math.abs(max - min) < 0.05
+				? formatPercent(min)
+				: `${formatPercent(min)} to ${formatPercent(max)}`;
+	return `${properties.length} units, ${pctText}. Click to ${
+		expanded ? 'collapse' : 'expand'
+	}.`;
+}
+
+function aggregateIncreasePct(properties: Reassessment[]) {
+	let base = 0;
+	let increase = 0;
+	for (const property of properties) {
+		const total2025 = property.assessment2025.total;
+		if (total2025 === null || property.increase === null) continue;
+		base += total2025;
+		increase += property.increase;
+	}
+	return base > 0 ? (increase / base) * 100 : null;
+}
+
+function toggleSetValue(set: Set<string>, key: string) {
+	const next = new Set(set);
+	if (next.has(key)) next.delete(key);
+	else next.add(key);
+	return next;
+}
+
+function collapsedPointRadius(count: number, zoom: number) {
+	const zoomScale = Math.max(0, Math.min(1, (zoom - 13) / 5));
+	const countScale = Math.sqrt(count);
+	return 3 + zoomScale * Math.min(12, countScale);
+}
+
 export function ReassessmentMarkers({
 	properties,
 	parcels,
@@ -174,6 +205,16 @@ export function ReassessmentMarkers({
 	const map = useMap();
 	const layerRef = useRef<L.LayerGroup | null>(null);
 	const rendererRef = useRef<L.Canvas | null>(null);
+	const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+	const [zoom, setZoom] = useState(() => map.getZoom());
+
+	useEffect(() => {
+		const handleZoom = () => setZoom(map.getZoom());
+		map.on('zoomend', handleZoom);
+		return () => {
+			map.off('zoomend', handleZoom);
+		};
+	}, [map]);
 
 	useEffect(() => {
 		if (!map.getPane('markers')) {
@@ -191,89 +232,126 @@ export function ReassessmentMarkers({
 		const renderer = rendererRef.current;
 		layer.clearLayers();
 
-		const displayedPins = new Set(properties.map((p) => p.pin));
-		const byPin = new Map(properties.map((p) => [p.pin, p]));
-		const renderedPins = new Set<string>();
-
+		const parcelByPin = new Map<string, GeoJSON.Feature>();
 		if (parcels) {
-			const groups = new Map<
-				string,
-				{ feature: GeoJSON.Feature; pins: string[] }
-			>();
 			for (const feature of parcels.features as GeoJSON.Feature[]) {
-				const pin = String(
-					feature.properties?.pin || feature.properties?.name || '',
+				const parcelPin = String(
+					feature.properties?.parcelPin || feature.properties?.name || '',
 				);
-				if (!pin || !displayedPins.has(pin)) continue;
-				const key = geometryFingerprint(feature);
-				const existing = groups.get(key);
-				if (existing) existing.pins.push(pin);
-				else groups.set(key, { feature, pins: [pin] });
-			}
-
-			for (const group of groups.values()) {
-				const latLngs = polygonLatLngs(group.feature);
-				if (!latLngs) continue;
-
-				if (group.pins.length === 1) {
-					const property = byPin.get(group.pins[0]);
-					if (!property) continue;
-					const color = increaseColor(property.increasePct);
-					L.polygon(latLngs as L.LatLngExpression[] | L.LatLngExpression[][], {
-						color,
-						fillColor: color,
-						fillOpacity: 0.62,
-						weight: 1,
-						renderer,
-						pane: 'markers',
-					})
-						.bindPopup(() => popup(property))
-						.addTo(layer);
-					renderedPins.add(property.pin);
-					continue;
-				}
-
-				const center = polygonCenter(group.feature);
-				if (!center) continue;
-				L.polygon(latLngs as L.LatLngExpression[] | L.LatLngExpression[][], {
-					color: '#737373',
-					fillColor: '#737373',
-					fillOpacity: 0.08,
-					weight: 1,
-					renderer,
-					pane: 'markers',
-					interactive: false,
-				}).addTo(layer);
-				group.pins.forEach((pin, index) => {
-					const property = byPin.get(pin);
-					if (!property) return;
-					addPointMarker(
-						layer,
-						renderer,
-						property,
-						offsetLatLng(center, index, group.pins.length),
-					);
-					renderedPins.add(property.pin);
-				});
+				if (parcelPin) parcelByPin.set(parcelPin, feature);
 			}
 		}
 
+		const parcelGroups = new Map<
+			string,
+			{ feature: GeoJSON.Feature; properties: Reassessment[] }
+		>();
 		const pointGroups = new Map<string, Reassessment[]>();
+
 		for (const property of properties) {
-			if (renderedPins.has(property.pin) || !property.lat || !property.lon) {
+			const feature =
+				parcelByPin.get(property.pin) ||
+				(property.parcelPin ? parcelByPin.get(property.parcelPin) : undefined);
+			if (feature) {
+				const parcelPin = String(
+					feature.properties?.parcelPin ||
+						feature.properties?.name ||
+						property.parcelPin ||
+						property.pin,
+				);
+				const key = `parcel:${parcelPin}`;
+				const group = parcelGroups.get(key) || { feature, properties: [] };
+				group.properties.push(property);
+				parcelGroups.set(key, group);
 				continue;
 			}
-			const key = `${property.lat.toFixed(6)},${property.lon.toFixed(6)}`;
+
+			if (!property.lat || !property.lon) continue;
+			const key = `point:${property.lat.toFixed(6)},${property.lon.toFixed(6)}`;
 			const rows = pointGroups.get(key) || [];
 			rows.push(property);
 			pointGroups.set(key, rows);
 		}
 
-		for (const group of pointGroups.values()) {
+		for (const [key, group] of parcelGroups) {
+			const latLngs = polygonLatLngs(group.feature);
+			if (!latLngs) continue;
+			const expanded = expandedGroups.has(key);
+			const color = increaseColor(aggregateIncreasePct(group.properties));
+
+			if (group.properties.length === 1) {
+				const property = group.properties[0];
+				L.polygon(latLngs as L.LatLngExpression[] | L.LatLngExpression[][], {
+					color,
+					fillColor: color,
+					fillOpacity: 0.62,
+					weight: 1,
+					renderer,
+					pane: 'markers',
+				})
+					.bindPopup(() => popup(property))
+					.addTo(layer);
+				continue;
+			}
+
+			const center = polygonCenter(group.feature);
+			const polygon = L.polygon(
+				latLngs as L.LatLngExpression[] | L.LatLngExpression[][],
+				{
+					color,
+					fillColor: color,
+					fillOpacity: expanded ? 0.06 : 0.2,
+					weight: expanded ? 1 : 2,
+					renderer,
+					pane: 'markers',
+				},
+			)
+				.bindTooltip(groupTooltip(group.properties, expanded))
+				.on('click', () => {
+					setExpandedGroups((current) => toggleSetValue(current, key));
+				})
+				.addTo(layer);
+
+			if (!expanded || !center) {
+				continue;
+			}
+
+			group.properties.forEach((property, index) => {
+				addPointMarker(
+					layer,
+					renderer,
+					property,
+					offsetLatLng(center, index, group.properties.length),
+				);
+			});
+			polygon.bringToBack();
+		}
+
+		for (const [key, group] of pointGroups) {
 			const center: [number, number] = [
 				group[0].lat as number,
 				group[0].lon as number,
 			];
+			const expanded = expandedGroups.has(key);
+			if (group.length > 1 && !expanded) {
+				const color = increaseColor(aggregateIncreasePct(group));
+				L.circleMarker(center, {
+					radius: collapsedPointRadius(group.length, zoom),
+					color,
+					fillColor: color,
+					fillOpacity: 0.35,
+					weight: 2,
+					renderer,
+					pane: 'markers',
+				})
+					.bindTooltip(groupTooltip(group, expanded))
+					.on('click', () => {
+						setExpandedGroups((current) => toggleSetValue(current, key));
+					})
+					.addTo(layer);
+				continue;
+			}
+
 			group.forEach((property, index) => {
 				addPointMarker(
 					layer,
@@ -287,7 +365,7 @@ export function ReassessmentMarkers({
 		return () => {
 			layer.clearLayers();
 		};
-	}, [properties, parcels, map]);
+	}, [properties, parcels, expandedGroups, zoom, map]);
 
 	return null;
 }
